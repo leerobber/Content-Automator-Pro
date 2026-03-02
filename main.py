@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List
 import anthropic
 import os
+import uuid
 import uvicorn
 
 app = FastAPI()
@@ -33,6 +34,14 @@ class ContentRequest(BaseModel):
     password: str
     topic: str
     keywords: List[str]
+
+class RatingRequest(BaseModel):
+    email: str
+    content_id: str
+    rating: int
+
+# In-memory ratings store
+ratings = {}
 
 @app.get("/", response_class=HTMLResponse)
 async def homepage():
@@ -125,6 +134,35 @@ async def homepage():
             margin-bottom: 15px;
             font-size: 0.85em;
         }
+        .rating-section {
+            margin-top: 14px;
+            text-align: center;
+        }
+        .rating-section p {
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #444;
+        }
+        .rating-btn {
+            width: auto;
+            padding: 6px 10px;
+            margin: 3px 2px;
+            background: #e5e7eb;
+            color: #333;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: normal;
+            cursor: pointer;
+            display: inline-block;
+        }
+        .rating-btn:hover { background: #667eea; color: white; }
+        .rating-btn.selected { background: #667eea; color: white; border-color: #667eea; }
+        #rating-feedback {
+            margin-top: 8px;
+            font-size: 0.9em;
+            color: #059669;
+        }
     </style>
 </head>
 <body>
@@ -152,6 +190,8 @@ async def homepage():
     </div>
 
     <script>
+        let currentContentId = null;
+
         async function generate() {
             const topic = document.getElementById('topic').value;
             const keywords = document.getElementById('keywords').value.split(',').map(k => k.trim());
@@ -162,6 +202,7 @@ async def homepage():
                 return;
             }
             
+            currentContentId = null;
             result.style.display = 'block';
             result.innerHTML = '<div style="text-align:center">⏳ AI writing... (30 sec)</div>';
             
@@ -180,6 +221,10 @@ async def homepage():
                 const data = await response.json();
                 
                 if (response.ok) {
+                    currentContentId = data.content_id;
+                    const ratingBtns = [1,2,3,4,5,6,7,8,9,10].map(n =>
+                        `<button class="rating-btn" onclick="rateContent(${n}, this)">${n}</button>`
+                    ).join('');
                     result.innerHTML = `
                         <h3 style="color: #059669; margin-bottom: 10px;">✅ Content Ready!</h3>
                         <div style="background: white; padding: 12px; border-radius: 5px; border: 1px solid #e5e7eb; white-space: pre-wrap; font-size: 0.85em;">
@@ -189,12 +234,43 @@ ${data.content}
                         <p style="color: #059669; margin-top: 8px; font-weight: bold;">
                             💰 Upgrade for unlimited: $29/month
                         </p>
+                        <div class="rating-section">
+                            <p>Rate this content (1–10):</p>
+                            ${ratingBtns}
+                            <div id="rating-feedback"></div>
+                        </div>
                     `;
                 } else {
                     result.innerHTML = `<p style="color: #dc2626;">❌ ${data.detail}</p>`;
                 }
             } catch (error) {
                 result.innerHTML = `<p style="color: #dc2626;">❌ Connection error. Try again!</p>`;
+            }
+        }
+
+        async function rateContent(rating, btn) {
+            document.querySelectorAll('.rating-btn').forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+            const feedback = document.getElementById('rating-feedback');
+            feedback.textContent = 'Submitting...';
+            try {
+                const response = await fetch('/rate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        email: 'demo@test.com',
+                        content_id: currentContentId,
+                        rating: rating
+                    })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    feedback.textContent = `⭐ Thanks! You rated this ${rating}/10.`;
+                } else {
+                    feedback.textContent = `❌ ${data.detail}`;
+                }
+            } catch (error) {
+                feedback.textContent = '❌ Could not submit rating.';
             }
         }
     </script>
@@ -234,14 +310,26 @@ Professional but conversational tone."""
         )
         
         content = message.content[0].text
+        content_id = str(uuid.uuid4())
         users[request.email]["credits"] -= 1
         
         return {
             "content": content,
+            "content_id": content_id,
             "credits_remaining": users[request.email]["credits"]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI error: {str(e)}")
+
+@app.post("/rate")
+async def rate_content(request: RatingRequest):
+    if request.rating < 1 or request.rating > 10:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 10")
+    user = users.get(request.email)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    ratings[f"{request.content_id}:{request.email}"] = request.rating
+    return {"message": "Rating saved", "content_id": request.content_id, "rating": request.rating}
 
 @app.get("/health")
 async def health():
